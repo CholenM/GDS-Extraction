@@ -1,0 +1,9 @@
+# GDS-Extraction — Runtime Dependencies
+fastapi>=0.115
+uvicorn[standard]>=0.30
+requests>=2.31
+python-dotenv>=1.0
+
+# Dev / test (used only on the Windows dev machine to unit-test the pipeline without a GPU)
+pytest>=8.0
+httpx>=0.27

@@ -1,0 +1,339 @@
+{
+  "Record type": "none",
+  "Passenger Name": [
+    "none"
+  ],
+  "PNR": "none",
+  "segments": [
+    {
+      "segment_number": 1,
+      "segment_record_locator": "none",
+      "airline_code": "PR",
+      "airline_name": "Philippine Airlines",
+      "flight_number": 221,
+      "originating_airport_code": "MNL",
+      "originating_airport_name": "Ninoy Aquino International Airport",
+      "originating_terminal": "1",
+      "destination_airport_code": "BNE",
+      "destination_airport_name": "Brisbane Airport",
+      "destination_terminal": "International",
+      "departure_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 3,
+        "year": 2025,
+        "day_of_week": "Wednesday",
+        "time": "23:45"
+      },
+      "arrival_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "09:30"
+      },
+      "flight_duration": "07:45",
+      "aircraft_type": "Airbus A321",
+      "service_class_letter": "none",
+      "service_class": "none"
+    },
+    {
+      "segment_number": 2,
+      "segment_record_locator": "none",
+      "airline_code": "FJ",
+      "airline_name": "Fiji Airways",
+      "flight_number": 920,
+      "originating_airport_code": "BNE",
+      "originating_airport_name": "Brisbane Airport",
+      "originating_terminal": "International",
+      "destination_airport_code": "NAN",
+      "destination_airport_name": "Nadi International Airport",
+      "destination_terminal": "none",
+      "departure_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "11:35"
+      },
+      "arrival_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "17:10"
+      },
+      "flight_duration": "03:35",
+      "aircraft_type": "Boeing 737",
+      "service_class_letter": "none",
+      "service_class": "none"
+    },
+    {
+      "segment_number": 3,
+      "segment_record_locator": "none",
+      "airline_code": "PR",
+      "airline_name": "Philippine Airlines",
+      "flight_number": 221,
+      "originating_airport_code": "MNL",
+      "originating_airport_name": "Ninoy Aquino International Airport",
+      "originating_terminal": "1",
+      "destination_airport_code": "BNE",
+      "destination_airport_name": "Brisbane Airport",
+      "destination_terminal": "International",
+      "departure_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 3,
+        "year": 2025,
+        "day_of_week": "Wednesday",
+        "time": "23:45"
+      },
+      "arrival_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "09:30"
+      },
+      "flight_duration": "07:45",
+      "aircraft_type": "Airbus A321",
+      "service_class_letter": "none",
+      "service_class": "none"
+    },
+    {
+      "segment_number": 4,
+      "segment_record_locator": "none",
+      "airline_code": "FJ",
+      "airline_name": "Fiji Airways",
+      "flight_number": 920,
+      "originating_airport_code": "BNE",
+      "originating_airport_name": "Brisbane Airport",
+      "originating_terminal": "International",
+      "destination_airport_code": "NAN",
+      "destination_airport_name": "Nadi International Airport",
+      "destination_terminal": "none",
+      "departure_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "11:35"
+      },
+      "arrival_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "17:10"
+      },
+      "flight_duration": "03:35",
+      "aircraft_type": "Boeing 737",
+      "service_class_letter": "none",
+      "service_class": "none"
+    },
+    {
+      "segment_number": 5,
+      "segment_record_locator": "none",
+      "airline_code": "QF",
+      "airline_name": "Qantas",
+      "flight_number": 3873,
+      "originating_airport_code": "BNE",
+      "originating_airport_name": "Brisbane Airport",
+      "originating_terminal": "International",
+      "destination_airport_code": "NAN",
+      "destination_airport_name": "Nadi International Airport",
+      "destination_terminal": "none",
+      "departure_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "11:35"
+      },
+      "arrival_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "17:10"
+      },
+      "flight_duration": "03:35",
+      "aircraft_type": "Boeing 737",
+      "service_class_letter": "none",
+      "service_class": "none"
+    },
+    {
+      "segment_number": 6,
+      "segment_record_locator": "none",
+      "airline_code": "QF",
+      "airline_name": "Qantas",
+      "flight_number": 20,
+      "originating_airport_code": "MNL",
+      "originating_airport_name": "Ninoy Aquino International Airport",
+      "originating_terminal": "3",
+      "destination_airport_code": "SYD",
+      "destination_airport_name": "Sydney Kingsford Smith Airport",
+      "destination_terminal": "1",
+      "departure_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 3,
+        "year": 2025,
+        "day_of_week": "Wednesday",
+        "time": "20:35"
+      },
+      "arrival_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "06:40"
+      },
+      "flight_duration": "08:05",
+      "aircraft_type": "Airbus A330-300",
+      "service_class_letter": "none",
+      "service_class": "none"
+    },
+    {
+      "segment_number": 7,
+      "segment_record_locator": "none",
+      "airline_code": "QF",
+      "airline_name": "Qantas",
+      "flight_number": 101,
+      "originating_airport_code": "SYD",
+      "originating_airport_name": "Sydney Kingsford Smith Airport",
+      "originating_terminal": "1",
+      "destination_airport_code": "NAN",
+      "destination_airport_name": "Nadi International Airport",
+      "destination_terminal": "none",
+      "departure_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "08:35"
+      },
+      "arrival_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "14:35"
+      },
+      "flight_duration": "04:00",
+      "aircraft_type": "Boeing 737",
+      "service_class_letter": "none",
+      "service_class": "none"
+    },
+    {
+      "segment_number": 8,
+      "segment_record_locator": "none",
+      "airline_code": "PR",
+      "airline_name": "Philippine Airlines",
+      "flight_number": 211,
+      "originating_airport_code": "MNL",
+      "originating_airport_name": "Ninoy Aquino International Airport",
+      "originating_terminal": "1",
+      "destination_airport_code": "SYD",
+      "destination_airport_name": "Sydney Kingsford Smith Airport",
+      "destination_terminal": "1",
+      "departure_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 3,
+        "year": 2025,
+        "day_of_week": "Wednesday",
+        "time": "22:30"
+      },
+      "arrival_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "08:45"
+      },
+      "flight_duration": "08:15",
+      "aircraft_type": "Airbus A330-200",
+      "service_class_letter": "none",
+      "service_class": "none"
+    },
+    {
+      "segment_number": 9,
+      "segment_record_locator": "none",
+      "airline_code": "FJ",
+      "airline_name": "Fiji Airways",
+      "flight_number": 910,
+      "originating_airport_code": "SYD",
+      "originating_airport_name": "Sydney Kingsford Smith Airport",
+      "originating_terminal": "1",
+      "destination_airport_code": "NAN",
+      "destination_airport_name": "Nadi International Airport",
+      "destination_terminal": "none",
+      "departure_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "13:15"
+      },
+      "arrival_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "18:55"
+      },
+      "flight_duration": "03:40",
+      "aircraft_type": "Airbus A350-900",
+      "service_class_letter": "none",
+      "service_class": "none"
+    },
+    {
+      "segment_number": 10,
+      "segment_record_locator": "none",
+      "airline_code": "QF",
+      "airline_name": "Qantas",
+      "flight_number": 3869,
+      "originating_airport_code": "SYD",
+      "originating_airport_name": "Sydney Kingsford Smith Airport",
+      "originating_terminal": "1",
+      "destination_airport_code": "NAN",
+      "destination_airport_name": "Nadi International Airport",
+      "destination_terminal": "none",
+      "departure_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "13:15"
+      },
+      "arrival_date_time": {
+        "month": 9,
+        "month_name": "September",
+        "date": 4,
+        "year": 2025,
+        "day_of_week": "Thursday",
+        "time": "18:55"
+      },
+      "flight_duration": "03:40",
+      "aircraft_type": "Airbus A350-900",
+      "service_class_letter": "none",
+      "service_class": "none"
+    }
+  ]
+}

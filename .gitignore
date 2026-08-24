@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Local process state
+.pids
+
+# Environment / secrets
+.env
+
+# Model files (large; transferred to the DGX, never committed)
+models/
+*.gguf
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
