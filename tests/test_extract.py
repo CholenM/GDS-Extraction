@@ -114,7 +114,9 @@ def test_build_prompt_encodes_key_rules():
 # --------------------------------------------------------------------------
 # Params + degradation
 # --------------------------------------------------------------------------
-def test_build_params_defaults():
+def test_build_params_defaults(monkeypatch):
+    # vLLM default: only chat_template_kwargs, no reasoning_effort
+    monkeypatch.setattr(gds, "MODEL_URL", "http://127.0.0.1:8011/v1/chat/completions")
     params = gds.build_params()
     assert params["temperature"] == gds.MODEL_TEMP
     assert params["top_p"] == gds.MODEL_TOP_P
@@ -122,8 +124,13 @@ def test_build_params_defaults():
     assert params["min_p"] == 0.0
     assert params["repetition_penalty"] == 1.0
     assert params["max_tokens"] == gds.MODEL_MAX_TOKENS
-    assert params["reasoning_effort"] == 0
     assert params["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "reasoning_effort" not in params
+    # Legacy 8006 path still sends reasoning_effort
+    monkeypatch.setattr(gds, "MODEL_URL", "http://127.0.0.1:8006/v1/chat/completions")
+    params_legacy = gds.build_params(0)
+    assert params_legacy["reasoning_effort"] == 0
+    assert params_legacy["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_build_params_reasoning_removed_when_enabled(monkeypatch):
@@ -133,15 +140,26 @@ def test_build_params_reasoning_removed_when_enabled(monkeypatch):
     assert "chat_template_kwargs" not in params
 
 
-def test_build_params_degradation_levels():
+def test_build_params_degradation_levels(monkeypatch):
+    # vLLM path: level 0 has chat, level 1 drops all
+    monkeypatch.setattr(gds, "MODEL_URL", "http://127.0.0.1:8011/v1/chat/completions")
     full = gds.build_params(0)
     l1 = gds._params_at_level(full, 1)
     l2 = gds._params_at_level(full, 2)
     assert "chat_template_kwargs" in full
     assert "chat_template_kwargs" not in l1
-    assert "reasoning_effort" in l1
+    assert "reasoning_effort" not in l1
     assert "chat_template_kwargs" not in l2
     assert "reasoning_effort" not in l2
+    # Legacy 8006: level1 keeps reasoning_effort
+    monkeypatch.setattr(gds, "MODEL_URL", "http://127.0.0.1:8006/v1/chat/completions")
+    full2 = gds.build_params(0)
+    ll1 = gds._params_at_level(full2, 1)
+    ll2 = gds._params_at_level(full2, 2)
+    assert "chat_template_kwargs" in full2
+    assert "chat_template_kwargs" not in ll1
+    assert "reasoning_effort" in ll1
+    assert "reasoning_effort" not in ll2
 
 
 # --------------------------------------------------------------------------
@@ -194,6 +212,38 @@ def test_estimate_tokens_is_conservative():
     assert gds.estimate_tokens("") == 0
     assert gds.estimate_tokens("abc") == 1
     assert gds.estimate_tokens("abcdef") == 2
+
+
+def test_gds_system_token_budget():
+    # Compressed prompt should stay <1100 tokens (was ~1300 before, now 1014)
+    assert gds.estimate_tokens(gds.GDS_SYSTEM) < 1100
+
+
+def test_resolve_max_tokens_adaptive():
+    # 2-segment Toby-like text should be ~1800, 10-segment ~4000, clamped 1024-4096
+    two = "PR 221 J7\nFJ 920 J5"
+    ten = "\n".join([f"PR {200+i} J5" for i in range(10)])
+    c2 = gds.resolve_max_tokens(two, 3072)
+    c10 = gds.resolve_max_tokens(ten, 3072)
+    assert 1024 <= c2 <= 4096
+    assert 1024 <= c10 <= 4096
+    assert c10 > c2  # more segments → larger cap
+    assert gds.resolve_max_tokens("", 3072) >= 1024
+    # Adaptive wins even when base is tiny (base is fallback for empty only)
+    assert 1024 <= gds.resolve_max_tokens(two, 512) <= 4096
+
+
+def test_estimate_segments():
+    assert gds.estimate_segments("PR 221 test") == 1
+    assert gds.estimate_segments("PR 221\nFJ 920\nQF 020") == 3
+    assert gds.estimate_segments("") == 1
+
+
+def test_context_budget_vllm(monkeypatch):
+    monkeypatch.setattr(gds, "CONTEXT_SIZE", 32768)
+    monkeypatch.setattr(gds, "MODEL_PARALLEL", 1)
+    assert gds.context_budget() == 32768
+    assert gds.usable_prompt_room() == 32768 - gds.MODEL_MAX_TOKENS - 256
 
 
 # --------------------------------------------------------------------------
@@ -420,7 +470,8 @@ def test_extract_http_over_budget_422(monkeypatch):
     r = c.post("/v1/extract", json={"gds_text": "x" * 30000}, headers=_auth())
     assert r.status_code == 422
     detail = r.json()["detail"].lower()
-    assert "slot" in detail and "token" in detail
+    assert "token" in detail
+    assert "slot" in detail or "context" in detail or "max_model_len" in detail
 
 
 def test_extract_batch_http(client):
@@ -558,7 +609,9 @@ def test_healthz_endpoint(client):
 def test_healthz_reports_context_check(monkeypatch):
     def fake_get(url, timeout=None):
         if url.endswith("/health"):
-            return FakeResp(200, "", {"ctx_size": 65536})
+            return FakeResp(200, "", {"ctx_size": 32768})
+        if url.endswith("/v1/models"):
+            return FakeResp(200, "", {"data": [{"id": gds.MODEL_NAME}]})
         if url.endswith("/props"):
             return FakeResp(200, "", {"default_generation_settings": {"n_ctx": gds.slot_budget()}})
         return FakeResp(500, "", {})
@@ -570,8 +623,22 @@ def test_healthz_reports_context_check(monkeypatch):
     body = r.json()
     assert body["model_server"] == "ready"
     assert body["context_budget"]["check"] == "match"
-    assert body["context_budget"]["slot_tokens"] == gds.slot_budget()
+    assert body["context_budget"]["max_model_len"] == gds.context_budget()
     assert body["version"] == gds.VERSION
+
+
+def test_healthz_vllm_reports_max_model_len(monkeypatch):
+    def fake_get(url, timeout=None):
+        if url.endswith("/health"):
+            return FakeResp(200, "", {"ctx_size": 32768})
+        if url.endswith("/v1/models"):
+            return FakeResp(200, "", {"data": [{"id": "Qwen3.6-35B-A3B-NVFP4"}]})
+        return FakeResp(500, "", {})
+    monkeypatch.setattr(gds.requests, "get", fake_get)
+    monkeypatch.setattr(gds, "CONTEXT_SIZE", 32768)
+    with TestClient(gds.app) as c:
+        r = c.get("/healthz")
+    assert r.json()["context_budget"]["max_model_len"] == 32768
 
 
 # --------------------------------------------------------------------------
@@ -663,6 +730,8 @@ def test_http_call_degrades_chat_template_kwargs(monkeypatch):
 
 
 def test_http_call_degrades_two_levels(monkeypatch):
+    # Legacy 8006 needs 3-level degradation
+    monkeypatch.setattr(gds, "MODEL_URL", "http://127.0.0.1:8006/v1/chat/completions")
     monkeypatch.setattr(gds, "_PARAMS_LEVEL", 0)
     calls = {"n": 0}
 
@@ -714,6 +783,8 @@ def test_http_call_caches_working_level_after_degradation(monkeypatch):
 
 def test_http_call_sends_bearer_only_when_key_present(monkeypatch):
     sent = {}
+    # Set a known key for this test
+    monkeypatch.setattr(gds, "LLAMA_SERVER_API_KEY", "test-key-123")
 
     def capture(*a, **k):
         sent["headers"] = k.get("headers")
@@ -721,7 +792,18 @@ def test_http_call_sends_bearer_only_when_key_present(monkeypatch):
 
     monkeypatch.setattr(gds.requests, "post", capture)
     gds.http_model_call(_messages(), {})
-    assert sent["headers"].get("Authorization") == f"Bearer {gds.LLAMA_SERVER_API_KEY}"
+    assert sent["headers"].get("Authorization") == "Bearer test-key-123"
+    # When key is empty, no Authorization header
+    monkeypatch.setattr(gds, "LLAMA_SERVER_API_KEY", "")
+    sent2 = {}
+
+    def capture2(*a, **k):
+        sent2["headers"] = k.get("headers")
+        return FakeResp(200, "", {"choices": [{"message": {"content": "x"}}]})
+
+    monkeypatch.setattr(gds.requests, "post", capture2)
+    gds.http_model_call(_messages(), {})
+    assert "Authorization" not in sent2["headers"]
 
 
 # --------------------------------------------------------------------------

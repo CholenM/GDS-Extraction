@@ -1,14 +1,14 @@
-# AI GDS Extraction — NVIDIA DGX Spark
+# AI GDS Extraction — NVIDIA DGX Spark (vLLM)
 
 Lean, JSON-in / JSON-out **GDS Extractor** — the local-model migration of Toby's API-based
 "GDS Extractor v3.6" (`make schedule`). It parses raw **GDS output lines** (Amadeus availability
 displays and complete reservations) into the structured flight-segment JSON defined in
-`implementation.md`, running fully offline on the NVIDIA DGX Spark by connecting to Toby's
-already-running **llama.cpp (CUDA)** model server (`Qwen3.8-27B`). This service is a **gateway
+`implementation.md`, running fully offline on the NVIDIA DGX Spark via the **vLLM server**
+`E:\DGXSpark_Setup\vllm-qwen` (`Qwen3.6-35B-A3B-NVFP4`, NVFP4/FP8, `:8011`). This service is a **gateway
 only** — it never starts or stops the model server.
 
-> Built on the proven `start.sh / stop.sh` + FastAPI skeleton from Proof‑Reader and QA‑Manager,
-> adapted to the same pre‑existing shared model server (no `setup.sh`, no model download).
+> v1.1 — vLLM Performance Fix: same contract & greedy decoding (`temp 0`), but async gateway,
+> adaptive `max_tokens` (3072 default), compressed prompt, and vLLM-native sizing for sub-60s p50.
 
 ---
 
@@ -32,10 +32,10 @@ only** — it never starts or stops the model server.
 ## What It Does
 
 - **`POST /v1/extract`** — parse a single GDS input into the schedule JSON.
-- **`POST /v1/extract_batch`** — parse many GDS inputs sequentially, with per-entry failure isolation.
+- **`POST /v1/extract_batch`** — parse many GDS inputs (sequential by default, `BATCH_CONCURRENCY>1` for parallel), with per-entry failure isolation.
 - **`POST /v1/version`** — instant parity command (never touches the model).
 
-The prompt encodes Toby's full spec verbatim:
+The prompt encodes Toby's full spec verbatim (compressed in v1.1, decoding unchanged):
 
 - **Record type** — `reservation` (record locators AND passenger names present) or `none`.
 - **PNR** — the *first* PNR in the whole record, not a per-segment locator.
@@ -63,81 +63,64 @@ The prompt encodes Toby's full spec verbatim:
                │  x-api-key: <key>
                ▼
        ┌──────────────────────────────────────────────────────────────────┐
-       │              DGX Spark (GB200 / Blackwell, unified memory)        │
+       │              DGX Spark (GB200 / Blackwell, unified 121.69 GiB)      │
        │                                                                     │
-       │  Proof-Reader's startserver.sh  (owns the shared model server)     │
-       │     └── llama-server :8006  CUDA, text mode, --jinja,               │
-       │                    4 parallel slots · CONTEXT_SIZE 65536 · 16384/slot
+       │  vllm-qwen :8011  (E:\DGXSpark_Setup\vllm-qwen)                     │
+       │     └── vLLM MAIN — Qwen3.6-35B-A3B-NVFP4 (MoE 35B/3B active)        │
+       │                    NVFP4 experts + FP8 KV, --enable-prefix-caching  │
+       │                    MAX_MODEL_LEN 32768 · GPU util 0.60→0.85          │
        │                                                                     │
        │  start.sh   (THIS project's gateway — connects, never launches)    │
-       │     └── FastAPI :8084  gds_extraction_service.py                   │
-       │              ├── client-side context guard (422, before network)    │
+       │     └── FastAPI :8084  gds_extraction_service.py (async httpx)      │
+       │              ├── adaptive max_tokens (1200+280*segs, 1024-4096)     │
+       │              ├── compressed GDS_SYSTEM (<1100 toks)                 │
+       │              ├── client-side guard (422, vLLM budget)                │
        │              ├── extract_json / _normalize_gds (schema coercion)    │
-       │              └── http_model_call → /v1/chat/completions (auth,       │
-       │                                 thinking-suppression degradation)    │
+       │              └── http_model_call_async → /v1/chat/completions        │
+       │                                 (chat_template_kwargs:{enable_thinking:false}) │
        └──────────────────────────────────────────────────────────────────┘
-                │
-                ▼
-       llama-server :8006  (Toby's Qwen3.8-27B, CUDA)
-          • start.sh / stop.sh NEVER start or kill it
-          • its --ctx-size / --parallel are fixed at its OWN launch
 ```
 
-- **Gateway‑only access:** clients talk to the FastAPI gateway on **:8084** and never reach the model
-  server directly.
-- **The model is pre‑existing.** `start.sh` only *probes* `/health`; it does not launch or manage
-  `llama-server`. `stop.sh` stops **only** the gateway and never touches the model.
-- **Server ownership.** The shared server lives in the **Proof‑Reader** repo
-  (`E:\Projects\Proof-Reader\startserver.sh`). It is launched **once** and shared across AI solutions.
-  This project is a thin client; it reads `CONTEXT_SIZE`/`MODEL_PARALLEL` to compute its own slot
-  budget for the guard and the `/healthz` cross-check.
-- **JSON in / JSON out.** The model server can't be relaunched with llama.cpp's JSON‑schema flag, so
-  the gateway **prompts the model to emit JSON** and **parses it client‑side** (`extract_json` +
-  `_normalize_gds`): it strips thinking blocks / code fences / preamble, locates the JSON span,
-  coerces it to the exact schema, and — unlike the QA Manager, where raw text degrades gracefully —
-  **fails closed** (never fabricates a schedule) with a `503` when nothing parseable is found.
+- **Gateway‑only access:** clients talk to `:8084` and never reach vLLM directly.
+- **The model is pre‑existing.** `start.sh` only *probes* `/health` + `/v1/models` (fallback). `stop.sh` stops **only** the gateway.
+- **Server ownership.** The vLLM server lives in `E:\DGXSpark_Setup\vllm-qwen\startserver.sh` (`:8011`, `MAX_MODEL_LEN 32768`). This project is a thin async client; it reads `CONTEXT_SIZE` (= `MAX_MODEL_LEN`) for the guard and `/healthz`.
+- **Decoding is frozen:** `temp 0.0 / top_p 0.5 / top_k 40` (greedy deterministic) — the fix is *prompt + max_tokens + async*, not sampling.
+- **JSON in / JSON out.** vLLM can optionally enforce schema via `ENABLE_GUIDED_JSON=1` (xgrammar `guided_json`), but default is prompt + client-side `extract_json`/`_normalize_gds` with **fail-closed** `503` on unparseable output.
 
 ---
 
 ## Deploy Order
 
-The model server is **shared and long-lived**. It must be running **before** the GDS-Extraction gateway.
+The vLLM server is **shared and long-lived**. It must be running **before** the gateway.
 
 ```bash
-# (1) From the Proof-Reader project — start the shared model server ONCE.
-cd E:\Projects\Proof-Reader
-./startserver.sh          # llama-server (text, --jinja) on :8006
+# (1) From vllm-qwen — start the model server ONCE (or reuse existing)
+cd E:\DGXSpark_Setup\vllm-qwen
+./startserver.sh          # vLLM MAIN on :8011 (takes ~3-15 min first boot, JIT)
 
-# (2) From the GDS-Extraction project — start the gateway and connect to :8006.
+# (2) From GDS-Extraction — start the gateway and connect to :8011
 cd E:\Projects\GDS-Extraction
 ./start.sh                # FastAPI gateway on :8084
 ```
 
-> **Pre-flight is strict.** `start.sh` waits up to 120s for the shared model server (`:8006`) to be
-> healthy. If it isn't reachable, it **stops and tells you to start it first** — run
-> `./startserver.sh` (from the Proof‑Reader project), then `./start.sh`. The gateway never starts
-> half-open.
+> **Pre-flight is strict.** `start.sh` waits up to 900s for `:8011` (`/health` + `/v1/models`). If not reachable, it **stops and tells you to start vllm-qwen first**. Legacy `:8006` still works if you set `MODEL_URL` in `.env` — the gateway auto-detects and falls back to the old 3-level reasoning chain.
 
-> **No cross-repo changes needed.** QA‑Manager's v2 already re-provisioned the shared server
-> (`--jinja`, `MODEL_PARALLEL=4`, `CONTEXT_SIZE=65536`). This project only *verifies* those flags and
-> mirrors them in its `.env`. See [Context Sizing](#context-sizing-important).
+> **Migrating from llama :8006?** Delete your old `.env` or update `MODEL_URL` to `http://127.0.0.1:8011/v1/chat/completions`, `MODEL_NAME` to `Qwen3.6-35B-A3B-NVFP4`, `CONTEXT_SIZE` to `32768`, `MODEL_PARALLEL` to `1`. `start.sh` warns if `.env` still points to `:8006`.
 
 ---
 
 ## Requirements
 
-- **NVIDIA DGX Spark** (GB200 Grace Blackwell, unified memory, Linux, CUDA drivers).
-- The model server (`llama-server :8006`, `Qwen3.8-27B`, `--jinja`) **already running** — see
-  "Context Sizing" below.
-- `python3`, and a Python venv (auto‑created by `start.sh` on first run).
+- **NVIDIA DGX Spark** (GB200 Grace Blackwell, unified 121.69 GiB, Linux, CUDA drivers).
+- The vLLM server (`:8011`, `Qwen3.6-35B-A3B-NVFP4`, `--enable-prefix-caching`) **already running** — see Context Sizing.
+- `python3`, venv (auto‑created by `start.sh` on first run).
 - `curl` (for testing).
 
 ---
 
 ## Quick Start
 
-> All steps run **on the DGX Spark** (Linux). The shell scripts are developed on the Windows machine
-> but executed on the DGX.
+> All steps run **on the DGX Spark** (Linux). Shell scripts are developed on Windows but executed on DGX.
 
 ### 1. Launch
 
@@ -146,24 +129,19 @@ cd E:\Projects\GDS-Extraction
 ./start.sh
 ```
 
-`start.sh` bootstraps a `.venv` + installs dependencies **once** (if absent), copies `.env.example`
-→ `.env` **once** (if absent) and prints a note to review, then runs a **strict pre-flight**: it
-waits up to 120s for the shared model server (`:8006`) to be healthy. If it's reachable, it starts the
-FastAPI gateway on **:8084**:
+`start.sh` bootstraps `.venv` + installs deps **once** (if absent), copies `.env.example` → `.env` **once** and prints a note to review, then probes vLLM `:8011`. If healthy, it starts the FastAPI gateway on **:8084**:
 
 ```
 ======== GDS Extraction is LIVE ========
   API:    http://0.0.0.0:8084
   Docs:   http://0.0.0.0:8084/docs
   Health: http://0.0.0.0:8084/healthz
-  Shared model server on :8006 (managed by Proof-Reader startserver.sh)
+  Model:  http://127.0.0.1:8011/v1/chat/completions (Qwen3.6-35B-A3B-NVFP4, vLLM MAX_MODEL_LEN=32768)
   Press Ctrl+C to stop the gateway only — the model server is left running.
 ========================================
 ```
 
 ### 2. Configure (optional)
-
-Review/edit `.env` — API keys, model URL, ports, context sizing, and the default year:
 
 ```bash
 nano .env
@@ -174,7 +152,7 @@ nano .env
 ```bash
 curl -s -X POST http://localhost:8084/v1/extract \
   -H "x-api-key: gds_key_0000" -H "Content-Type: application/json" \
-  -d '{"gds_text":"AN3SEPMNLNAN ** AMADEUS AVAILABILITY - AN **\n..."}'
+  -d '{"gds_text":"AN3SEPMNLNAN ** AMADEUS AVAILABILITY - AN **\nNANNADI.FJ 32 TU 03SEP 0000 1    PR 221   J5 C5 ..."}'
 ```
 
 ### 4. Stop
@@ -183,8 +161,7 @@ curl -s -X POST http://localhost:8084/v1/extract \
 ./stop.sh
 ```
 
-Stops **only the gateway** (PID‑file based, with a gateway‑only name fallback). The shared model
-server is left untouched.
+Stops **only the gateway** (PID‑file + name fallback). vLLM is left untouched.
 
 ---
 
@@ -194,7 +171,7 @@ Base URL: `http://<dgx-spark>:8084`
 
 ### `POST /v1/extract`
 
-Parse a single GDS input into the schedule JSON. **Requires the `x-api-key` header.**
+Parse a single GDS input into the schedule JSON. **Requires `x-api-key`.**
 
 **Request**
 
@@ -209,12 +186,10 @@ The GDS text is placed into a delimited section in the prompt to reduce injectio
 **`POST /v1/version`** — instant, never touches the model.
 
 ```json
-{ "version": "1.0" }
+{ "version": "1.1" }
 ```
 
-**`POST /v1/extract_batch`** — parse many entries sequentially. Each entry is processed with its own
-model call so one bad input cannot poison the others or overflow the shared slot budget. Overall
-status is `200`; each item reports `status: "ok"` or `status: "error"`.
+**`POST /v1/extract_batch`** — parse many entries. Default `BATCH_CONCURRENCY=1` sequential; set `BATCH_CONCURRENCY=2-4` in `.env` for parallel async. Each entry isolated.
 
 ```json
 // request
@@ -235,10 +210,10 @@ status is `200`; each item reports `status: "ok"` or `status: "error"`.
 |--------|---------|
 | `401` | Missing or invalid `x-api-key`. |
 | `422` | Malformed body / missing or empty required field. |
-| `422` | **Over-budget prompt** — the client-side context guard rejected it *before any network call*. The body contains exact sizing guidance (per-slot budget, `CONTEXT_SIZE`, `MODEL_PARALLEL`) and how to re-provision the server. |
+| `422` | **Over-budget prompt** — client-side guard rejected it *before network*. Body contains sizing guidance (`MAX_MODEL_LEN`, `max_tokens`, `prompt_room`) and how to raise `MAX_MODEL_LEN` via `vllm-qwen/startserver.sh`. |
 | `503` | Model server unreachable / timed out / returned empty. |
-| `503` | **Unparseable model output.** Extraction **fails closed** (never fabricates a schedule) — try again, or raise the shared server's context window. |
-| `503` | Request exceeds the model's context window (server-side overflow). The model server's ctx is fixed at launch — restart `llama-server` with a larger `--ctx-size` and set `CONTEXT_SIZE` to match. |
+| `503` | **Unparseable model output.** Extraction **fails closed** (never fabricates a schedule). |
+| `503` | **Truncation** — `completion_tokens == max_tokens` hit the adaptive cap (log warns). Retry with larger `MODEL_MAX_TOKENS` or `MAX_MODEL_LEN`. |
 | `500` | Unexpected pipeline error. |
 
 **Examples**
@@ -249,34 +224,32 @@ curl -s -X POST http://localhost:8084/v1/extract \
   -H "x-api-key: gds_key_0000" -H "Content-Type: application/json" \
   -d '{"gds_text":"AN3SEPMNLNAN ** AMADEUS AVAILABILITY - AN **\nNANNADI.FJ 32 TU 03SEP…"}'
 
-# Batch (processed sequentially; bad entries are isolated per-item)
+# Batch
 curl -s -X POST http://localhost:8084/v1/extract_batch \
   -H "x-api-key: gds_key_0000" -H "Content-Type: application/json" \
   -d '{"entries":[{"id":"r1","gds_text":"AN3SEP…"},{"id":"r2","gds_text":"AN3SEP…"}]}'
 
-# Version (instant, no model call)
+# Version (instant)
 curl -s -X POST http://localhost:8084/v1/version
 ```
 
-Interactive API docs: open **http://<dgx-spark>:8084/docs**.
+Interactive docs: **http://<dgx-spark>:8084/docs**.
 
 ### `GET /healthz`
 
-Liveness probe; reports model‑server readiness, the computed per‑slot context budget, a
-cross-check of that budget against the running server's per‑slot `n_ctx`, and the current default-year
-mode.
+Liveness probe; checks vLLM `/health` + `/v1/models` and reports the **vLLM-native budget** (`max_model_len`, `prompt_room`, `max_tokens_default`) and whether `model_name` matches `SERVED_MODEL_NAME`.
 
 ```bash
 curl -s http://localhost:8084/healthz
-# {"status":"healthy","model_server":"ready","model_name":"Qwen3.8-27B",
-#  "context_budget":{"slot_tokens":16384,"server_ctx_size":65536,"check":"match"},
-#  "default_year_mode":"current-year","version":"1.0"}
+# {"status":"healthy","model_server":"ready","model_name":"Qwen3.6-35B-A3B-NVFP4",
+#  "vllm_model_id":"Qwen3.6-35B-A3B-NVFP4",
+#  "context_budget":{"max_model_len":32768,"prompt_room":29440,"max_tokens_default":3072,"check":"match"},
+#  "default_year_mode":"current-year","version":"1.1"}
 ```
 
-- `context_budget.slot_tokens` = `CONTEXT_SIZE // MODEL_PARALLEL` (the gateway's assumed budget).
-- `check` = `match` / `mismatch` / `unknown`: whether the gateway's per‑slot budget matches the
-  server's actual per‑slot `n_ctx`. A `mismatch` means the `.env` sizing doesn't match the running
-  server — re-provision and restart.
+- `context_budget.max_model_len` = `CONTEXT_SIZE` (= vLLM `MAX_MODEL_LEN`).
+- `prompt_room` = `MAX_MODEL_LEN - MODEL_MAX_TOKENS - 256`.
+- `check` = `match` / `mismatch` / `unknown`: whether `MODEL_NAME` matches vLLM's `id`. Legacy `:8006` also checks `n_ctx` slots.
 
 ---
 
@@ -318,10 +291,8 @@ curl -s http://localhost:8084/healthz
 ```
 
 - Airport **codes are sacrosanct** — copied verbatim; only the name is translated.
-- `+N` arrival-day offsets are resolved into the correct date, month, year, and day-of-week (month
-  and year rollovers included). Times are 24-hour `HH:MM`.
-- For availability displays: `Record type: "none"`, `Passenger Name: ["none"]`, `PNR: "none"`, and
-  per-segment `segment_record_locator` / `service_class_letter` / `service_class` = `none`.
+- `+N` arrival-day offsets are resolved into the correct date, month, year, and day-of-week (month and year rollovers included). Times are 24-hour `HH:MM`.
+- For availability displays: `Record type: "none"`, `Passenger Name: ["none"]`, `PNR: "none"`, and per-segment `segment_record_locator` / `service_class_letter` / `service_class` = `none`.
 
 ---
 
@@ -331,76 +302,68 @@ All keys live in `.env` (see `.env.example`). The defaults here **are** the code
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `MODEL_URL` | `http://127.0.0.1:8006/v1/chat/completions` | Endpoint of the **running** model server. |
-| `MODEL_NAME` | `Qwen3.8-27B` | Reported to the server (matches the shared launch). |
-| `LLAMA_SERVER_API_KEY` | `sk-internal-proofreader` | Bearer token the gateway presents to the **shared** server (sent only if non‑empty). **Must match** the shared server's `--api-key`. |
-| `CONTEXT_SIZE` | `65536` | Total ctx of the shared server. **Must match** the server's launch flags. See [Context Sizing](#context-sizing-important). |
-| `MODEL_PARALLEL` | `4` | Shared-server slots; **must match** the server's launch. Per-slot budget = `CONTEXT_SIZE // MODEL_PARALLEL` = 16,384. |
-| `MODEL_MAX_TOKENS` | `8192` | Max output tokens. GDS manifests are large (the golden sample alone emits ~10 segments ≈ 4k+ tokens); 8192 gives truncation headroom. Raising it reduces the local prompt-room budget. |
-| `MODEL_TEMP` / `MODEL_TOP_P` / `MODEL_TOP_K` | `0.0` / `0.5` / `40` | Sampling. **Temp 0 (greedy)** gives run-to-run deterministic extraction — validated on-DGX. |
-| `DISABLE_THINKING` | `1` | Request `reasoning_effort=0`; send `chat_template_kwargs:{enable_thinking:false}` (best-effort). `extract_json()` also strips leaked thinking defensively. |
-| `CONTEXT_GUARD` | `strict` | Client-side context guard: `strict` (422 + guidance), `warn` (allow + log), or `off` (testing). |
-| `REQUEST_TIMEOUT` | `300` | Timeout to the model server, in seconds. **Batch requests multiply this per entry.** |
-| `DEFAULT_YEAR` | `""` (empty → current year at request time) | Year used when the GDS line omits one. Pin a year without a code change, e.g. `DEFAULT_YEAR="2025"`. |
-| `API_PORT` / `API_HOST` | `8084` / `0.0.0.0` | Gateway bind. **Not 8082** (Proof‑Reader) or **8083** (QA‑Manager). |
+| `MODEL_URL` | `http://127.0.0.1:8011/v1/chat/completions` | Endpoint of the **running** vLLM server. Legacy `:8006` still works via fallback. |
+| `MODEL_NAME` | `Qwen3.6-35B-A3B-NVFP4` | Reported to the server (must match vLLM `SERVED_MODEL_NAME`). |
+| `LLAMA_SERVER_API_KEY` | `""` | Bearer token the gateway presents (sent only if non‑empty). vLLM default is empty. |
+| `CONTEXT_SIZE` | `32768` | **vLLM** `MAX_MODEL_LEN`. Must match `vllm-qwen/startserver.sh` `--max-model-len`. |
+| `MODEL_PARALLEL` | `1` | No slots on vLLM (was `4` on llama). Keep `1`. |
+| `MODEL_MAX_TOKENS` | `3072` | Baseline max output tokens. **Adaptive per-request**: `1200+280*segs+0.6*inp` clamped `1024-4096`. Prevents the old 8192 runaway (7k tokens → 103s). |
+| `MODEL_TEMP` / `MODEL_TOP_P` / `MODEL_TOP_K` | `0.0` / `0.5` / `40` | **FROZEN** — greedy deterministic extraction, validated on-DGX. Do not change. |
+| `DISABLE_THINKING` | `1` | Sends `chat_template_kwargs:{enable_thinking:false}` to vLLM (Qwen3.6 needs this). Legacy `:8006` also sends `reasoning_effort:0`. |
+| `ENABLE_GUIDED_JSON` | `0` | When `1`, sends `guided_json` schema via `extra_body` to vLLM (xgrammar). Experimental — off by default. |
+| `BATCH_CONCURRENCY` | `1` | `1`=sequential, `2-4`=parallel async via `asyncio.gather`. |
+| `ENABLE_STREAMING` | `0` | `1`=use `stream=True` for TTFT instrumentation. Off by default (stable). |
+| `CONTEXT_GUARD` | `strict` | `strict` (422 + guidance), `warn` (allow + log), or `off` (testing). |
+| `REQUEST_TIMEOUT` | `120` | Timeout to vLLM, seconds. Surfaces slow 100s+ regressions faster than old 300. |
+| `DEFAULT_YEAR` | `""` (empty → current year at request time) | Year used when the GDS line omits one. Pin, e.g. `DEFAULT_YEAR="2025"`. |
+| `API_PORT` / `API_HOST` | `8084` / `0.0.0.0` | Gateway bind. Not `8011` (vLLM). |
 | `API_KEY_AUTH_HEADER` | `x-api-key` | Header name for client auth. |
-| `API_KEYS` | `gds_key_0000:GDS Extraction Local Testing` | Comma‑separated valid client keys. Replace with your own secrets. |
+| `API_KEYS` | `gds_key_0000:GDS Extraction Local Testing` | Comma‑separated valid client keys. |
 
 **Port map**
 
 | Port | Owner | Managed by |
 |------|-------|-----------|
-| `8006` | Shared `llama-server` (`Qwen3.8-27B`, CUDA) | `Proof-Reader/startserver.sh` |
-| `8082` | Proof‑Reader gateway | `Proof-Reader/start.sh` |
-| `8083` | QA‑Manager gateway | `QA-Manager/start.sh` |
+| `8011` | vLLM `Qwen3.6-35B-A3B-NVFP4` (NVFP4/FP8) | `E:\DGXSpark_Setup\vllm-qwen\startserver.sh` |
 | `8084` | **GDS‑Extraction gateway** | `start.sh` (this project) |
-
-**Rotating API keys:** edit `.env` and restart the gateway (`./stop.sh && ./start.sh`). Keys load at
-startup. This only restarts the FastAPI gateway — the shared model server keeps running.
+| `8006` | Legacy `llama-server` (deprecated, still supported as fallback) | `Proof-Reader/startserver.sh` |
 
 ---
 
 ## Context Sizing (important)
 
-This is the shared root cause **RC1**: llama.cpp splits its total `--ctx-size` **across** `--parallel`
-slots, so the per-slot budget is `CONTEXT_SIZE // MODEL_PARALLEL`. GDS manifests are large, so
-prompt headroom matters.
+vLLM uses **continuous batching**, not llama's `--parallel` slots. The budget is simply `MAX_MODEL_LEN`.
 
-**Prompt-room budget** = `slot_tokens − MODEL_MAX_TOKENS − 256` safety margin. With the default
-balanced profile (`16,384` per-slot) and `MODEL_MAX_TOKENS=8192`, that leaves ≈ **7,936 tokens** of
-prompt headroom (~23.8k chars of GDS text) — ample for availability displays; the guard catches
-outliers.
+**Prompt-room budget** = `MAX_MODEL_LEN − MODEL_MAX_TOKENS − 256` safety margin. With defaults `32768 - 3072 - 256 = **29440 tokens**` (~88k chars GDS) — **3.7× the old 7936 slot** — ample for any availability display; guard rarely trips. Old `422` rate-limit behavior preserved.
 
-**Sizing matrix.** Set `CONTEXT_SIZE` and `MODEL_PARALLEL` in this repo's `.env` to **match** the
-shared server's launch flags (Proof‑Reader's `startserver.sh`):
+**Adaptive cap** (new in v1.1): each request computes `max_tokens = clamp(1200 + 280*estimated_segments + 0.6*input_tokens, 1024, 4096)`. Examples: Toby `2-seg` → `~1800` (≈26s worst at 68 tok/s vs old 8192 → 120s), golden `10-seg` → `~4000` (≈58s worst vs 120s). If `completion_tokens == max_tokens` in logs, the cap was hit (possible truncation — the gateway logs a warning).
 
-| Profile | `CONTEXT_SIZE` | `MODEL_PARALLEL` | Per-slot budget | Prompt room (with max_tokens 8192) |
-|---------|---------------|------------------|-----------------|------------------------------------|
-| Conservative | `32768` | `4` | 8,192 | 0 *(slot ≈ max_tokens — too little headroom for GDS | raise `MODEL_MAX_TOKENS` or the server ctx)* |
-| **Balanced (default)** | `65536` | `4` | **16,384** | **7,936** |
-| Maximum | `131072` | `2` | 65,536 *(verify GPU memory first)* | 57,088 |
+**Sizing matrix**
 
-The current shared server is provisioned at the **balanced** profile (`65536 / 4`).
+| Profile | `CONTEXT_SIZE` (=MAX_MODEL_LEN) | `MODEL_PARALLEL` | Prompt room (3072 default) | When |
+|---------|-------------------------------|------------------|----------------------------|------|
+| **vLLM default** | `32768` | `1` | **29440** | Covers all GDS cases, 7 gateways + coding concurrently |
+| Large | `65536` | `1` | `62208` | If you raise `MAX_MODEL_LEN` via `vllm-qwen/startserver.sh` |
+| Legacy llama | `65536` | `4` | `7936` (old slot math) | Only when `MODEL_URL` points to `:8006` |
 
-**If a request overflows it**, the client-side guard rejects it with a `422` *before* any network
-call and tells you exactly what to do. To allow larger inputs, re-provision the shared server:
+To allow larger prompts, raise vLLM's window:
 
 ```bash
-# 1. From Proof-Reader: stop + re-provision the shared server with a larger window
-#    (e.g. 131072 ctx, 2 parallel slots) — requires GPU-memory headroom.
-cd E:\Projects\Proof-Reader
-./stopserver.sh && ./startserver.sh     # startserver.sh sources .env; edit it first
+# 1. Raise vLLM's --max-model-len (requires restart + GPU headroom)
+cd E:\DGXSpark_Setup\vllm-qwen
+# edit .env: MAX_MODEL_LEN=65536
+./stop.sh && ./startserver.sh
 
-# 2. Set the SAME values in .env to match the re-provisioned server.
-#       CONTEXT_SIZE="131072"
-#       MODEL_PARALLEL="2"
+# 2. Set SAME value in this repo's .env
+#    CONTEXT_SIZE="65536"
+#    MODEL_PARALLEL="1"
 
-# 3. Restart the gateway so it picks up the new sizing.
+# 3. Restart gateway
 cd E:\Projects\GDS-Extraction
 ./stop.sh && ./start.sh
 
-# 4. Verify /healthz reports context_budget.check == "match".
-curl -s http://localhost:8084/healthz
+# 4. Verify /healthz reports max_model_len: match
+curl -s http://localhost:8084/healthz | python3 -m json.tool
 ```
 
 ---
@@ -408,77 +371,47 @@ curl -s http://localhost:8084/healthz
 ## Local Development & Testing
 
 The core logic (`build_prompt`, `build_params`, `estimate_tokens`, `check_context`, `extract_json`,
-`_normalize_gds`, `run_extract`, `run_extract_batch`) is **pure** and takes an injectable model call
-— so the entire business logic is unit‑tested **on the Windows dev machine with a stub backend, no GPU
-needed.**
+`_normalize_gds`, `run_extract`, `run_extract_batch`, `resolve_max_tokens`, `estimate_segments`) is **pure** and takes an injectable model call — so the entire business logic is unit‑tested **on the Windows dev machine with a stub backend, no GPU needed.**
 
 ```bash
-# From the repo root
 pip install -r requirements.txt   # includes pytest + httpx
 pytest -v
 ```
 
-The suite (`tests/test_extract.py`) covers the pure pipeline, thinking-suppression parameter
-degradation, the client-side context guard (strict 422 / warn / off), JSON extraction (thinking‑block
-/ fence / preamble stripping + **fail-closed** behavior), schema coercion (`_normalize_gds`),
-single/batch orchestration with per-entry isolation, the HTTP layer (auth `401`, validation `422`,
-over-budget `422`, unavailable `503`, unparseable `503`), the content-resolution chain
-(`reasoning_content`), the `/healthz` budget cross-check, a golden-case plumbing check against
-Toby's documented Amadeus sample, and a config-drift test pinning `.env.example` to the code defaults.
-**All 62 cases pass locally.**
+The suite (`tests/test_extract.py`, 67 cases) covers prompt shape (sentinel + delimiters + all rule blocks), `GDS_SYSTEM` token budget (`<1100`), adaptive `max_tokens`, thinking suppression (vLLM vs legacy `:8006` paths), context guard (`max_model_len` + legacy slots), JSON extraction (think-block/fence/preamble stripping + fail-closed), schema coercion, orchestration, guard-trip before model, batch isolation, `resolve_default_year`, HTTP layer (auth `401`, validation `422`, over-budget `422`, unavailable `503`, unparseable `503`), content-resolution (`reasoning_content` leak), `/healthz` vLLM budget cross-check, golden-case plumbing, and config-drift pinning `.env.example` to code defaults. **All 67 pass locally.**
 
-The Amadeus availability sample (input + expected 10-segment output) lives in
-`tests/cases/` for on‑DGX smoke‑testing. See `implementation.md` §2 Phase E for the remaining on-DGX
-verifications (determinism ×3, the reservation case, and a concurrency check that the sibling gateways
-still work alongside :8084).
+The Amadeus availability sample (input + expected 10-segment output) lives in `tests/cases/` for on‑DGX smoke‑testing. See `implementation.md` §2 Phase F for DGX verifications (Toby `<60s`, golden `<60s`, byte-identical ×3, prefix-cache, batch concurrency, `benchmark_load.py` coexistence).
 
 ---
 
 ## Troubleshooting
 
 **`422` over-budget prompt.**
-The client-side context guard rejected the request because the estimated prompt exceeds the per-slot
-budget, *before* any network call. The response body contains exact sizing guidance. Shorten the GDS
-input, or raise the shared server's per-slot budget and restart (see [Context Sizing](#context-sizing-important)).
+Client-side guard rejected the request before any network call. Body now says `MAX_MODEL_LEN=32768 ... prompt_room = MAX_MODEL_LEN - max_tokens - 256` + the adaptive cap for that request. Shorten GDS, or raise vLLM's `--max-model-len` and set `CONTEXT_SIZE` to match (see Context Sizing). Legacy `:8006` still reports slot math.
 
 **`/healthz` reports `mismatch` under `context_budget.check`.**
-The gateway's per-slot budget (`CONTEXT_SIZE // MODEL_PARALLEL`) doesn't match the running server's
-per-slot `n_ctx`. The server was launched with different flags than `.env` states — re-provision it
-(matching `.env`) and restart the gateway. See [Context Sizing](#context-sizing-important).
+`MODEL_NAME` (`Qwen3.6-35B-A3B-NVFP4`) doesn't match vLLM's `id` from `/v1/models`. Check `SERVED_MODEL_NAME` in `vllm-qwen/.env` / `MODEL_NAME` in this repo's `.env`.
 
 **`/healthz` reports `degraded` / `unreachable`.**
-The gateway couldn't reach `llama-server :8006`. Wait for the model to be up. If it keeps failing,
-confirm it's running (`nvidia-smi`, `curl http://127.0.0.1:8006/health`) and that `MODEL_URL` in
-`.env` points at the right port. `start.sh`'s startup pre-flight fails fast (up to 120s) if the
-shared server isn't healthy — run `./startserver.sh` (Proof‑Reader project) first, then `./start.sh`.
+Gateway couldn't reach vLLM `:8011`. Wait for model to be up. Check `nvidia-smi`, `curl http://127.0.0.1:8011/health`, `curl http://127.0.0.1:8011/v1/models`, and `MODEL_URL` in `.env`. `start.sh` waits up to 900s (vLLM JIT) — run `E:\DGXSpark_Setup\vllm-qwen\startserver.sh` first, then `./start.sh`. Legacy fallback: if `MODEL_URL` is `:8006`, check llama-server instead.
 
 **`503` — "could not find a JSON object" / unparseable.**
-Extraction **fails closed** (never fabricates a schedule). This can mean the model returned prose
-instead of JSON, or emitted malformed JSON. Retry; if it persists, confirm `DISABLE_THINKING=1` and
-that the server was started with `--jinja`, and that the GDS input isn't truncated. See "thinking" below.
+Fail-closed (never fabricates). Try again; if persists, confirm `DISABLE_THINKING=1` and that input isn't truncated. With `ENABLE_GUIDED_JSON=1`, schema enforcement should eliminate this — try toggling it. Check gateway log for `thinking markers found` warnings.
 
 **`503` — "Model server unavailable."**
-`llama-server` isn't reachable / timed out / returned empty. Confirm it's running and reachable, and
-that `LLAMA_SERVER_API_KEY` (`.env`) matches the shared server's `--api-key`; a key mismatch surfaces
-as a 503.
+vLLM not reachable / timeout / hit `max_tokens` cap. Confirm `curl -v http://127.0.0.1:8011/health`, check gateway log for `hit max_tokens cap` (means adaptive cap was too low — raise `MODEL_MAX_TOKENS` or `MAX_MODEL_LEN`), and that `LLAMA_SERVER_API_KEY` matches if vLLM has `API_KEY` set (default empty).
+
+**Latency still ~100s (no improvement).**
+Check gateway log: `max_tokens` should be `~1800` for 2-seg, not `8192`; `completion_tokens` should be `~600-900`, not `7000`; `thinking_leaked` should be `false`. If `completion_tokens ≈ max_tokens`, you hit the cap (truncation). If `reasoning_content` leaked (`thinking markers found`), `DISABLE_THINKING` wasn't honored — verify vLLM version honors `chat_template_kwargs` and that `MODEL_URL` is `:8011` (not `:8006`). Also check vLLM log: `gen ~68 tok/s` is healthy; `prefix cache hit rate` should go `>0` on second identical request (if it stays `0.0%` after the fix, file a `vllm-qwen` issue — not gateway-blocked).
 
 **The model emits reasoning/"thinking" text.**
-Confirm `DISABLE_THINKING=1` in `.env` and that the shared server was started with **`--jinja`**
-(Proof‑Reader's `startserver.sh`). The response resolver also falls back to `reasoning_content`;
-`extract_json()` strips any leaked `<think>` / `<|begin_thinking|>` blocks defensively. Check the
-gateway log for a warning about extraction.
-
-**The model never resolves `+N` arrival dates / day-of-week correctly.**
-This is prompt-driven (the gateway does no date math — the spec chose a pure-prompt approach). If a
-specific rule is consistently wrong, tighten the relevant rule in the `GDS_SYSTEM` prompt in
-`gds_extraction_service.py`, then re-run the golden smoke test.
+Confirm `DISABLE_THINKING=1` and `MODEL_URL` points to `:8011`. Gateway logs `thinking trace leaked despite suppression (reasoning_len=...)` when vLLM returns `reasoning_content` despite the flag — this now counts toward generation time, so the fix surfaces it. `extract_json()` strips it defensively, but you should still see the warning.
 
 **A batch entry is broken but others succeed.**
-Expected. Each entry is isolated (`status: "error"`, with the reason in `error`); good entries are
-never lost. See the batch endpoint in [API Reference](#api-reference).
+Expected. Each entry isolated (`status: "error"`); good entries never lost. See batch endpoint. With `BATCH_CONCURRENCY>1`, overall wall time drops (vLLM batches them).
 
 **API key rejected.**
-Confirm the key in `API_KEYS` (`.env`) matches the `x-api-key` you send.
+Confirm key in `API_KEYS` (`.env`) matches `x-api-key` you send.
 
 ---
 
@@ -486,12 +419,13 @@ Confirm the key in `API_KEYS` (`.env`) matches the `x-api-key` you send.
 
 | File | Purpose |
 |------|---------|
-| `gds_extraction_service.py` | Single‑file FastAPI app: `.env` config, pure pipeline functions (prompt, params, guard, extract_json, `_normalize_gds`, single + batch extract), HTTP model backend (thinking-suppression degradation + content resolution), routes, lean API‑key auth. |
-| `start.sh` | One‑entry launch: bootstrap `.venv`/`.env`, pre-flight probe the shared model server, start the gateway only. |
-| `stop.sh` | Graceful shutdown of the **gateway only** (never the shared model server). |
-| `.env.example` | Config template. Copy to `.env` and edit. **Must match the code defaults** (enforced by test). |
-| `requirements.txt` | Runtime deps (`fastapi`, `uvicorn`, `requests`, `python-dotenv`) + dev/test (`pytest`, `httpx`). |
-| `tests/test_extract.py` | pytest suite (stub backend) — runs on the dev machine, no GPU. |
+| `gds_extraction_service.py` | Single‑file FastAPI app: `.env` config (vLLM-native), `GDS_SYSTEM` (compressed, <1100 toks), `resolve_max_tokens`/`estimate_segments`, `build_prompt`/`build_params` (vLLM-native, decoding frozen), `estimate_tokens`/`context_budget`/`check_context`, `extract_json`/`_normalize_gds`, `run_extract`/`run_extract_batch`, async `http_model_call`/`http_model_call_async` (httpx, guided JSON, usage/TTFT logging), routes + auth, `/healthz` vLLM budget. |
+| `start.sh` | One‑entry launch: bootstrap `.venv`/`.env`, pre-flight probe `:8011` (`/health` + `/v1/models`, 900s), launch gateway only. Warns if `.env` still points to `:8006`. |
+| `stop.sh` | Graceful shutdown of **gateway only** (never vLLM). |
+| `.env.example` | Config template (vLLM defaults: `8011 / Qwen3.6-35B-A3B-NVFP4 / 32768/1 / 3072`). **Must match code defaults** (enforced by test). |
+| `requirements.txt` | Runtime deps (`fastapi`, `uvicorn`, `requests`, `httpx`, `python-dotenv`) + dev/test (`pytest`). |
+| `tests/test_extract.py` | pytest suite (67 cases, stub backend, Windows no-GPU). |
 | `tests/cases/amadeus_availability_input.txt` | Toby's Amadeus availability sample input. |
-| `tests/cases/amadeus_availability_expected.json` | Expected 10-segment output — drives the golden-case plumbing test. |
-| `implementation.md` | Design + roadmap (architecture decisions, contract, risks). |
+| `tests/cases/amadeus_availability_expected.json` | Expected 10-segment output — drives golden-case plumbing test. |
+| `implementation.md` | Design + roadmap (vLLM Performance Fix, §1.2 root cause with 103s trace, §1.3 mermaid, sizing matrix). |
+| `gds-extraction-prompts.md` | Verbatim prompt reference (points to compressed `GDS_SYSTEM` lines). |
