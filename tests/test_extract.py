@@ -215,8 +215,9 @@ def test_estimate_tokens_is_conservative():
 
 
 def test_gds_system_token_budget():
-    # Compressed prompt should stay <1100 tokens (was ~1300 before, now 1014)
-    assert gds.estimate_tokens(gds.GDS_SYSTEM) < 1100
+    # Full-fidelity prompt restored after over-compression caused misclassification (PR507 T case)
+    # Now ~1926 toks; keep <2200 to allow full rule set while staying well under 29440 prompt room
+    assert gds.estimate_tokens(gds.GDS_SYSTEM) < 2200
 
 
 def test_resolve_max_tokens_adaptive():

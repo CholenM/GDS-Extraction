@@ -83,7 +83,7 @@ BATCH_CONCURRENCY = max(1, int(os.getenv("BATCH_CONCURRENCY", "1")))
 ENABLE_STREAMING = os.getenv("ENABLE_STREAMING", "0").lower() in ("1", "true", "yes")
 # Default YEAR used when the GDS line omits a year. Empty string => current
 # year at request time.
-DEFAULT_YEAR_ENV = os.getenv("DEFAULT_YEAR", "").strip()
+DEFAULT_YEAR_ENV = os.getenv("DEFAULT_YEAR", "2025").strip()
 # Client-side context guard:
 #   strict (default) -> reject over-budget requests with a 422 + guidance
 #   warn             -> allow the request but log a warning
@@ -120,57 +120,101 @@ _SAMPLING_KEYS = (
     "max_tokens",
 )
 
-# Guided JSON schema for §1.5 (used only when ENABLE_GUIDED_JSON=1).
+# Guided JSON schema for boss spec (pages 1-12) — used when ENABLE_GUIDED_JSON=1.
+# This is the Source of Truth for decoding; it mirrors the sample result (pages 6-12)
+# which is the superset that includes day_of_week + airport names.
+# Key fixes for the 14SEP benchmark: enforces sacrosanct 3-letter airport codes,
+# single-letter service_class_letter from immediately after flight number, and
+# correct year default (2025 per v3.5.1) via prompt, but schema enforces types here.
 _GDS_JSON_SCHEMA: dict = {
     "type": "object",
     "properties": {
-        "Record type": {"type": "string", "enum": ["reservation", "none"]},
-        "Passenger Name": {"type": "array", "items": {"type": "string"}},
-        "PNR": {"type": "string"},
+        "Record type": {
+            "type": "string",
+            "enum": ["reservation", "none"],
+            "description": "reservation if record locators AND passenger names (e.g. 1.IGNACIO/CYNTHIA) present; else none. MNLSIN is a route, not a name."
+        },
+        "Passenger Name": {
+            "type": "array",
+            "items": {"type": "string", "description": "LASTNAME/FIRSTNAME, sacrosanct; none if no passenger pattern"},
+            "description": "Array of passenger names or [\"none\"] for availability displays. Never hallucinate MNLSIN as a name."
+        },
+        "PNR": {
+            "type": "string",
+            "description": "First 6-char PNR in record (e.g. FDJ3BN), or 'none' for availability displays",
+            "pattern": r"^(none|[A-Z0-9]{6})$"
+        },
         "segments": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
-                    "segment_number": {"type": "integer"},
-                    "segment_record_locator": {"type": "string"},
-                    "airline_code": {"type": "string"},
-                    "airline_name": {"type": "string"},
-                    "flight_number": {"type": "integer"},
-                    "originating_airport_code": {"type": "string"},
-                    "originating_airport_name": {"type": "string"},
-                    "originating_terminal": {"type": "string"},
-                    "destination_airport_code": {"type": "string"},
+                    "segment_number": {"type": "integer", "description": "1-based as shown at start of segment line"},
+                    "segment_record_locator": {"type": "string", "description": "6 chars after DCPR (PR) or after final / (CX/FDJ3BN), or 'none' for availability"},
+                    "airline_code": {
+                        "type": "string",
+                        "description": "2-char code, sacrosanct, immediately after segment_number (e.g. 2  PR 507 → PR)",
+                        "pattern": r"^[A-Z0-9]{2}$"
+                    },
+                    "airline_name": {"type": "string", "description": "Full name: PR→Philippine Airlines, CX→Cathay Pacific, FJ→Fiji Airways, QF→Qantas"},
+                    "flight_number": {"type": "integer", "description": "Integer immediately after airline_code"},
+                    "originating_airport_code": {
+                        "type": "string",
+                        "description": "3-letter ORIGIN, sacrosanct (e.g. MNLSIN→MNL, must not be T or E)",
+                        "pattern": r"^[A-Z]{3}$"
+                    },
+                    "originating_airport_name": {"type": "string", "description": "Full airport name exactly matching the 3-letter code, never Cotabato for MNL"},
+                    "originating_terminal": {"type": "string", "description": "'none' if absent"},
+                    "destination_airport_code": {
+                        "type": "string",
+                        "description": "3-letter DESTINATION, sacrosanct",
+                        "pattern": r"^[A-Z]{3}$"
+                    },
                     "destination_airport_name": {"type": "string"},
                     "destination_terminal": {"type": "string"},
                     "departure_date_time": {
                         "type": "object",
                         "properties": {
-                            "month": {"type": "integer"}, "month_name": {"type": "string"},
-                            "date": {"type": "integer"}, "year": {"type": "integer"},
-                            "day_of_week": {"type": "string"}, "time": {"type": "string"},
+                            "month": {"type": "integer", "minimum": 1, "maximum": 12},
+                            "month_name": {"type": "string", "enum": ["January","February","March","April","May","June","July","August","September","October","November","December"]},
+                            "date": {"type": "integer", "minimum": 1, "maximum": 31},
+                            "year": {"type": "integer", "description": "2025 when year omitted (v3.5.1)"},
+                            "day_of_week": {"type": "string", "enum": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]},
+                            "time": {"type": "string", "pattern": r"^\d{2}:\d{2}$", "description": "HH:MM 24h, first time after route (e.g. 0930 → 09:30)"},
                         },
                         "required": ["month", "month_name", "date", "year", "day_of_week", "time"],
                     },
                     "arrival_date_time": {
                         "type": "object",
                         "properties": {
-                            "month": {"type": "integer"}, "month_name": {"type": "string"},
-                            "date": {"type": "integer"}, "year": {"type": "integer"},
-                            "day_of_week": {"type": "string"}, "time": {"type": "string"},
+                            "month": {"type": "integer", "minimum": 1, "maximum": 12},
+                            "month_name": {"type": "string", "enum": ["January","February","March","April","May","June","July","August","September","October","November","December"]},
+                            "date": {"type": "integer", "minimum": 1, "maximum": 31},
+                            "year": {"type": "integer"},
+                            "day_of_week": {"type": "string", "enum": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]},
+                            "time": {"type": "string", "pattern": r"^\d{2}:\d{2}$", "description": "HH:MM, second time (e.g. 1315 → 13:15)"},
                         },
                         "required": ["month", "month_name", "date", "year", "day_of_week", "time"],
                     },
-                    "flight_duration": {"type": "string"},
-                    "aircraft_type": {"type": "string"},
-                    "service_class_letter": {"type": "string"},
-                    "service_class": {"type": "string"},
+                    "flight_duration": {"type": "string", "pattern": r"^\d{2}:\d{2}$", "description": "HH:MM, 09:30→13:15 = 03:45"},
+                    "aircraft_type": {"type": "string", "description": "321→Airbus A321, 333→Airbus A330-300, 332→A330-200, 359→A350-900, 73H→Boeing 737, 7M8→737 MAX 8"},
+                    "service_class_letter": {
+                        "type": "string",
+                        "description": "Single letter immediately after flight_number (e.g. PR 507 T → T, not E after date)",
+                        "pattern": r"^[A-Z]$"
+                    },
+                    "service_class": {
+                        "type": "string",
+                        "enum": ["Business", "Premium", "Economy", "none"],
+                        "description": "PR: C,D,I,J,Z=Business, N,W=Premium, others inc B,T=Economy; other airlines same mapping or 'none' for availability"
+                    },
                 },
-                "required": ["segment_number", "airline_code", "flight_number"],
+                "required": ["segment_number", "airline_code", "flight_number", "originating_airport_code", "destination_airport_code", "departure_date_time", "arrival_date_time", "flight_duration", "aircraft_type", "service_class_letter", "service_class"],
             },
         },
     },
     "required": ["Record type", "Passenger Name", "PNR", "segments"],
+    "additionalProperties": False,
 }
 
 # ---------------------------------------------------------------------------
@@ -228,47 +272,72 @@ class ContextGuardExceeded(ValueError):
 # ===========================================================================
 # The system prompt encodes every parse rule from Toby's spec (AI_GDS_EXTRACTION.md).
 # ``__DEFAULT_YEAR__`` is a sentinel replaced at call time.
-# v1.1 compression: ~30% shorter (<750 toks) but verbatim-faithful — all 11
-# rule blocks kept, decoding unchanged.
+# v1.1 — restored full fidelity for accuracy (was over-compressed in v1.1b), still
+# enforces No <think> and vLLM-native thinking OFF. Decoding unchanged.
 GDS_SYSTEM = """You are a meticulous Global Distribution System (GDS) flight-data extractor.
-Parse the GDS output and return ONLY a JSON object. No commentary, no explanations, no markdown, no <think> blocks.
+You parse the provided GDS output and return ONLY a JSON object describing the
+flight schedule. No commentary, no explanations, no markdown, no <think> blocks outside the JSON.
 
-The DEFAULT YEAR is __DEFAULT_YEAR__. Use it when the GDS line omits a year.
+The DEFAULT YEAR is __DEFAULT_YEAR__. Use it for any date where the GDS line
+omits a year entirely. Per the boss spec v3.5.1, when year is missing assume 2025.
 
-OUTPUT ONLY THIS JSON OBJECT (exact keys, no extras):
+OUTPUT ONLY THIS JSON OBJECT (exact key names shown; do not add other keys):
 {{
   "Record type": "reservation" | "none",
-  "Passenger Name": [ "LASTNAME/FIRSTNAME(s)", ... ] OR [ "none" ],
+  "Passenger Name": [ "LASTNAME/FIRSTNAME(s)", ... ]  OR  [ "none" ],
   "PNR": "<6-char PNR>" | "none",
   "segments": [ {{ ...segment... }} ]
 }}
 
-Rules:
-- Record type: "reservation" if record locators AND passenger names present; else "none".
-- PNR: FIRST PNR in the whole record (NOT per-segment locator); "none" for availability displays.
-- Passenger names (reservations): start AFTER the numerical passenger number; capture until first '/' (last vs first name boundary); preserve ORIGINAL "LASTNAME/FIRSTNAME(s)" exactly including prefix and trailing chars after locator digits; extract EVERY passenger (up to 9); if none → ["none"]; if last name begins with "APDI", keep ENTIRE last name including "APDI".
-- Availability display (no PNR/names): "Record type" "none", "Passenger Name" ["none"], "PNR" "none"; per segment "segment_record_locator" "none", "service_class_letter" "none", "service_class" "none" (availability counts like "J5 C5 D5" are NOT class of service).
-- Per segment:
-  - segment_number: integer (1-based as shown)
-  - airline_code: 2-char code (sacrosanct — copy verbatim)
-  - airline_name: full name (PR -> Philippine Airlines, FJ -> Fiji Airways, QF -> Qantas)
-  - flight_number: integer
-  - originating_airport_code: 3-letter (sacrosanct — copy verbatim, NEVER change it)
-  - originating_airport_name: full airport name matching the code
-  - originating_terminal: "none" if absent
-  - destination_airport_code: 3-letter (sacrosanct)
-  - destination_airport_name: full airport name matching the code
-  - destination_terminal: "none" if absent
-  - departure_date_time / arrival_date_time: {{month (int), month_name (string), date (int), year (int), day_of_week (string), time ("HH:MM")}}. Resolve "+N" arrival offsets into correct date/month/year AND day_of_week (handle Aug 31->Sep 1 and Dec 31->Jan 1 rollovers). Times 24-hour "HH:MM".
-  - flight_duration: "HH:MM"
-  - aircraft_type: human-readable (321 -> Airbus A321; 333 -> Airbus A330-300; 332 -> Airbus A330-200; 359 -> Airbus A350-900; 73H -> Boeing 737; 7M8 -> Boeing 737 MAX 8); do not add sub-model detail beyond source
-  - service_class_letter: single letter
-  - service_class: Philippine Airlines Business = C,D,I,J,Z; Premium = N,W; Economy = ALL OTHER codes (NOTE: B is Economy). Other airlines: report letter unchanged
-  - segment_record_locator: 6 chars after "DCPR" (Philippine Airlines); near end for Cebu Pacific; "none" for availability
-  - Codeshare "FJ:QF3873" → emit QF marketing code and number (Qantas 3873)
-  - Airport translation: choose airport exactly matching 3-letter code; NEVER substitute nearby airport.
+Record type: set to "reservation" ONLY if the record contains one or more record
+locators AND at least one passenger name in the form "1.LASTNAME/FIRSTNAME" or "1 LASTNAME/FIRSTNAME"; otherwise set to "none". A string like "MNLSIN" is a route, NOT a passenger name. If no passenger names match that pattern, output ["none"] and "none" PNR — never hallucinate.
 
-Return ONLY the JSON. No preamble, no fences, no reasoning.
+PNR: the FIRST PNR in the whole record (NOT a per-segment locator). "none" for
+availability displays. A PNR is exactly 6 alphanumeric characters (e.g. FDJ3BN).
+
+Passenger names (for reservations):
+- Start AFTER the numerical passenger number and optional dot, which marks the beginning of the
+  passenger name (e.g. "1.IGNACIO/CYNTHIA" → start after "1.").
+- Capture everything until the first slash '/' (that is the boundary between
+  last name and first names).
+- Preserve the ORIGINAL format "LASTNAME/FIRSTNAME(s)" exactly, INCLUDING any
+  prefix and ANY trailing characters that follow the locator digits.
+- Extract EVERY passenger in the record (up to 9). If there are none, output
+  [ "none" ].
+- If a passenger's last name begins with "APDI", keep the ENTIRE last name
+  including the "APDI" characters in the output, while listing all other names.
+
+For an AVAILABILITY DISPLAY (no PNR, no passenger names):
+- "Record type": "none", "Passenger Name": ["none"], "PNR": "none".
+- For each segment set "segment_record_locator": "none",
+  "service_class_letter": "none", "service_class": "none" ONLY when the input is truly an availability display. For PNR Details ("PNR Details" header) the service class letter IS the single letter immediately after the flight number (e.g. PR 507 T → T), NOT the trailing "E" near the aircraft code.
+  (Availability counts such as "J5 C5 D5" are NOT a service class of service.)
+
+For EACH flight segment, extract EXACTLY as it appears — do not infer:
+- segment_number: integer, as it appears at the start of the segment line (1-based).
+- airline_code: 2-char airline code (sacrosanct — copy verbatim). In PNR format the code follows the segment number (e.g. "2  PR 507").
+- airline_name: full airline name (e.g., PR -> Philippine Airlines, FJ -> Fiji
+  Airways, QF -> Qantas, CX -> Cathay Pacific).
+- flight_number: integer immediately after airline_code.
+- service_class_letter: the SINGLE LETTER immediately after flight_number (e.g. PR 507 T → T). Do not take the letter after the date or near "E 0".
+- originating_airport_code: 3-letter code of the ORIGIN (sacrosanct — copy verbatim, NEVER change it). In PNR format it is the 6-char route field after the day number: MNLSIN → MNL is origin, SIN is destination. In availability format it is after the "/" (e.g. /MNL 1 BNE → MNL→BNE). Validate: must be 3 uppercase letters, not "T" or "E".
+- originating_airport_name: full airport name matching the code (choose exactly matching airport, never Cotabato for MNL).
+- originating_terminal: "none" if absent from the GDS line.
+- destination_airport_code: 3-letter code of the DESTINATION (sacrosanct).
+- destination_airport_name: full airport name matching the code.
+- destination_terminal: "none" if absent.
+- departure_date_time / arrival_date_time: objects with these exact keys:
+  month (integer 1-12), month_name (string), date (integer), year (integer),
+  day_of_week (string), time ("HH:MM").
+- Dates: parse like "14SEP" → 14 September, "27JUN" → 27 June. Resolve "+N" arrival day-offsets into the correct date, month, year AND day_of_week (handle month and year rollovers, e.g. Aug 31 -> Sep 1, or Dec 31 -> Jan 1 of the next year). Times are 24-hour "HH:MM" — departure time is the first time after the route/status field (e.g. DK1  0930), arrival time is the second time (e.g. 1315).
+- flight_duration: "HH:MM" computed as arrival minus departure (handle overnight +1). 09:30→13:15 = 03:45, 14:30→18:30 = 04:00. Do not guess 05:45.
+- aircraft_type: human-readable type (321 -> Airbus A321; 333 -> Airbus A330-300; 332 -> Airbus A330-200; 359 -> Airbus A350-900; 73H -> Boeing 737; 7M8 -> Boeing 737 MAX 8; 333 H or 333 -> Airbus A330-300). Do not state a more specific sub-model than the source implies.
+- service_class: mapped class. Philippine Airlines: Business = C,D,I,J,Z; Premium = N,W; Economy = ALL OTHER codes (NOTE: B is Economy, T is Economy). Other airlines (including CX): report Economy/Business as per letter without remapping unless specified — treat T/Q as Economy for this data but do not hallucinate "E".
+- segment_record_locator: 6 characters following "DCPR" for Philippine Airlines; near the end of the segment data for Cebu Pacific; for CX in this PNR it is the code after the final "/" (e.g. CX/FDJ3BN → FDJ3BN) but "none" for availability displays unless a PNR is present. If unsure and Record type is "none", use "none".
+- For codeshare legs formatted like "FJ:QF3873", emit the QF marketing code and number (Qantas 3873).
+- When translating airport codes, choose the airport that exactly matches the 3-letter code; NEVER substitute a nearby or different airport.
+
+Return ONLY the JSON object above. No preamble, no code fences, no commentary, no reasoning.
 """
 
 
