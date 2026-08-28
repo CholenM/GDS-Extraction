@@ -83,7 +83,7 @@ BATCH_CONCURRENCY = max(1, int(os.getenv("BATCH_CONCURRENCY", "1")))
 ENABLE_STREAMING = os.getenv("ENABLE_STREAMING", "0").lower() in ("1", "true", "yes")
 # Default YEAR used when the GDS line omits a year. Empty string => current
 # year at request time.
-DEFAULT_YEAR_ENV = os.getenv("DEFAULT_YEAR", "2025").strip()
+DEFAULT_YEAR_ENV = os.getenv("DEFAULT_YEAR", "").strip()
 # Client-side context guard:
 #   strict (default) -> reject over-budget requests with a 422 + guidance
 #   warn             -> allow the request but log a warning
