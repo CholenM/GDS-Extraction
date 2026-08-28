@@ -197,7 +197,7 @@ _GDS_JSON_SCHEMA: dict = {
                         "required": ["month", "month_name", "date", "year", "day_of_week", "time"],
                     },
                     "flight_duration": {"type": "string", "pattern": r"^\d{2}:\d{2}$", "description": "HH:MM, 09:30→13:15 = 03:45"},
-                    "aircraft_type": {"type": "string", "description": "321→Airbus A321, 333→Airbus A330-300, 332→A330-200, 359→A350-900, 73H→Boeing 737, 7M8→737 MAX 8"},
+                    "aircraft_type": {"type": "string", "description": "321→Airbus A321, 333→Airbus A330-300, 332→A330-200, 359→Airbus A350-900, 73H→Boeing 737, 7M8→Boeing 737 MAX 8. If no aircraft code is present in the GDS line, output 'none'. NEVER use external knowledge."},
                     "service_class_letter": {
                         "type": "string",
                         "description": "Single letter immediately after flight_number (e.g. PR 507 T → T, not E after date)",
@@ -279,7 +279,7 @@ You parse the provided GDS output and return ONLY a JSON object describing the
 flight schedule. No commentary, no explanations, no markdown, no <think> blocks outside the JSON.
 
 The DEFAULT YEAR is __DEFAULT_YEAR__. Use it for any date where the GDS line
-omits a year entirely. Per the boss spec v3.5.1, when year is missing assume 2025.
+omits a year entirely.
 
 OUTPUT ONLY THIS JSON OBJECT (exact key names shown; do not add other keys):
 {{
@@ -330,8 +330,8 @@ For EACH flight segment, extract EXACTLY as it appears — do not infer:
   month (integer 1-12), month_name (string), date (integer), year (integer),
   day_of_week (string), time ("HH:MM").
 - Dates: parse like "14SEP" → 14 September, "27JUN" → 27 June. Resolve "+N" arrival day-offsets into the correct date, month, year AND day_of_week (handle month and year rollovers, e.g. Aug 31 -> Sep 1, or Dec 31 -> Jan 1 of the next year). Times are 24-hour "HH:MM" — departure time is the first time after the route/status field (e.g. DK1  0930), arrival time is the second time (e.g. 1315).
-- flight_duration: "HH:MM" computed as arrival minus departure (handle overnight +1). 09:30→13:15 = 03:45, 14:30→18:30 = 04:00. Do not guess 05:45.
-- aircraft_type: human-readable type (321 -> Airbus A321; 333 -> Airbus A330-300; 332 -> Airbus A330-200; 359 -> Airbus A350-900; 73H -> Boeing 737; 7M8 -> Boeing 737 MAX 8; 333 H or 333 -> Airbus A330-300). Do not state a more specific sub-model than the source implies.
+- flight_duration: "HH:MM" computed as arrival minus departure (handle overnight +1). GDS times are ALWAYS in local time at each airport — compute the true flight duration accounting for the origin and destination timezones. Example: 12:25 SYD(UTC+10) → 18:50 MNL(UTC+8): raw subtraction gives 06:25, but converting to a common reference: 12:25 SYD = 10:25 UTC, 18:50 MNL = 10:50 UTC → 10:50 − 10:25 = 08:25. The answer is 08:25, NOT 06:25.
+- aircraft_type: human-readable type ONLY if a code appears in the GDS line (321 -> Airbus A321; 333 -> Airbus A330-300; 332 -> Airbus A330-200; 359 -> Airbus A350-900; 73H -> Boeing 737; 7M8 -> Boeing 737 MAX 8; 333 H or 333 -> Airbus A330-300). If no aircraft code appears in the GDS data, output "none". NEVER use external knowledge or guess the aircraft type. Do not state a more specific sub-model than the source implies.
 - service_class: mapped class. Philippine Airlines: Business = C,D,I,J,Z; Premium = N,W; Economy = ALL OTHER codes (NOTE: B is Economy, T is Economy). Other airlines (including CX): report Economy/Business as per letter without remapping unless specified — treat T/Q as Economy for this data but do not hallucinate "E".
 - segment_record_locator: 6 characters following "DCPR" for Philippine Airlines; near the end of the segment data for Cebu Pacific; for CX in this PNR it is the code after the final "/" (e.g. CX/FDJ3BN → FDJ3BN) but "none" for availability displays unless a PNR is present. If unsure and Record type is "none", use "none".
 - For codeshare legs formatted like "FJ:QF3873", emit the QF marketing code and number (Qantas 3873).
@@ -545,15 +545,30 @@ def _seg_str(value: Any, default: str = "none") -> str:
     return s if s else default
 
 
+# Pre-computed weekday names (Python weekday: Mon=0 … Sun=6)
+_DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
 def _normalize_date_time(value: Any) -> dict:
     if not isinstance(value, dict):
         value = {}
+    year = _to_int(value.get("year"))
+    month = _to_int(value.get("month"))
+    day = _to_int(value.get("date"))
+    # Compute day_of_week from the date fields — never trust the LLM for date arithmetic.
+    if year and month and day:
+        try:
+            computed_dow = _DAY_NAMES[date(year, month, day).weekday()]
+        except ValueError:
+            computed_dow = _seg_str(value.get("day_of_week"))
+    else:
+        computed_dow = _seg_str(value.get("day_of_week"))
     return {
-        "month": _to_int(value.get("month")),
+        "month": month,
         "month_name": _seg_str(value.get("month_name")),
-        "date": _to_int(value.get("date")),
-        "year": _to_int(value.get("year")),
-        "day_of_week": _seg_str(value.get("day_of_week")),
+        "date": day,
+        "year": year,
+        "day_of_week": computed_dow,
         "time": _seg_str(value.get("time")),
     }
 

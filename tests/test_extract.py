@@ -331,8 +331,35 @@ def test_normalize_gds_coerces_types():
     dt = seg["departure_date_time"]
     assert dt["month"] == 9 and dt["date"] == 3 and dt["year"] == 2025
     assert dt["month_name"] == "none"
-    assert dt["day_of_week"] == "none"
+    # day_of_week is computed from date fields, not defaulted to "none"
+    assert dt["day_of_week"] == "Wednesday"  # Sep 3, 2025
     assert dt["time"] == "none"
+
+
+def test_normalize_date_time_computes_day_of_week_overriding_llm():
+    """Regression: LLM may compute day_of_week using a different year than
+    the `year` field (e.g. year=2026 but dow=Saturday which is 2025's day).
+    The code must always trust the date arithmetic, never the LLM string.
+
+    Sep 13 2026 = Sunday (not Saturday).
+    """
+    result = gds._normalize_date_time({
+        "month": 9, "month_name": "September",
+        "date": 13, "year": 2026,
+        "day_of_week": "Saturday",   # LLM gives wrong answer
+        "time": "12:25",
+    })
+    assert result["day_of_week"] == "Sunday"  # Corrected by code
+
+
+def test_normalize_date_time_falls_back_to_llm_when_incomplete():
+    """When date fields are missing/zero, day_of_week falls back to LLM value."""
+    result = gds._normalize_date_time({
+        "year": None, "month": None, "date": None,
+        "day_of_week": "Monday",
+        "time": "12:25",
+    })
+    assert result["day_of_week"] == "Monday"
 
 
 def test_normalize_gds_drops_junk_keys():
