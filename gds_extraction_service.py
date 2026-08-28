@@ -474,8 +474,11 @@ OUTPUT ONLY THIS JSON OBJECT (exact key names shown; do not add other keys):
 Record type: set to "reservation" ONLY if the record contains one or more record
 locators AND at least one passenger name in the form "1.LASTNAME/FIRSTNAME" or "1 LASTNAME/FIRSTNAME"; otherwise set to "none". A string like "MNLSIN" is a route, NOT a passenger name. If no passenger names match that pattern, output ["none"] and "none" PNR — never hallucinate.
 
-PNR: the FIRST PNR in the whole record (NOT a per-segment locator). "none" for
-availability displays. A PNR is exactly 6 alphanumeric characters (e.g. FDJ3BN).
+PNR: the MASTER reservation code — EXACTLY 6 alphanumeric chars in the HEADER LINE
+(the first line before numbered segments). Usually at the FAR RIGHT after timestamps.
+Example header "RP/AGENCY  CA/GS  27AUG26/0515Z   EMVWJM" → PNR = "EMVWJM".
+The 6-char code after "AIRLINE_CODE/" at end of segment lines (e.g. "UA/ENC0WM") is
+a per-segment locator, NOT the master PNR — always prefer the header. "none" for availability displays.
 
 Passenger names (for reservations):
 - Start AFTER the numerical passenger number and optional dot, which marks the beginning of the
@@ -512,10 +515,16 @@ For EACH flight segment, extract EXACTLY as it appears — do not infer:
   month (integer 1-12), month_name (string), date (integer), year (integer),
   day_of_week (string), time ("HH:MM").
 - Dates: parse like "14SEP" → 14 September, "27JUN" → 27 June. Resolve "+N" arrival day-offsets into the correct date, month, year AND day_of_week (handle month and year rollovers, e.g. Aug 31 -> Sep 1, or Dec 31 -> Jan 1 of the next year). Times are 24-hour "HH:MM" — departure time is the first time after the route/status field (e.g. DK1  0930), arrival time is the second time (e.g. 1315).
-- flight_duration: "HH:MM" computed as arrival minus departure (handle overnight +1). GDS times are in local time at each airport. Use timezone offsets: convert dep to destination tz, then diff = arr - (dep + dest_off - orig_off). US DST note (Oct 2026): SFO/LAX/SEA = UTC-7 (PDT, DST ends Nov 1); IAD/JFK/EWR = UTC-4 (EDT). Do NOT use PST (UTC-8) for US west coast before Nov 1. N* fields (e.g. "6*MNLSFO") = NUMBER OF CONSECUTIVE DAYS available, NOT arrival day offset. The +N day offset is in the arrival DATE field, not N*.
+- flight_duration: "HH:MM" — computed server-side from dep/arr times and airport timezones.
+  GDS times are local to each airport. Overnight flights (+1 day) use the next-day arrival date.
+  US DST note (Oct 2026): SFO/LAX/SEA = UTC-7 (PDT); IAD/JFK/EWR = UTC-4 (EDT).
+  N* fields (e.g. "6*MNLSFO") = CONSECUTIVE DAYS available, NOT arrival day offset.
 - aircraft_type: human-readable type ONLY if a code appears in the GDS line (321 -> Airbus A321; 333 -> Airbus A330-300; 332 -> Airbus A330-200; 359 -> Airbus A350-900; 73H -> Boeing 737; 7M8 -> Boeing 737 MAX 8; 333 H or 333 -> Airbus A330-300). If no aircraft code appears in the GDS data, output "none". NEVER use external knowledge or guess the aircraft type. Do not state a more specific sub-model than the source implies.
 - service_class: mapped class. Philippine Airlines: Business = C,D,I,J,Z; Premium = N,W; Economy = ALL OTHER codes (NOTE: B is Economy, T is Economy). Other airlines (including CX): report Economy/Business as per letter without remapping unless specified — treat T/Q as Economy for this data but do not hallucinate "E".
-- segment_record_locator: 6 characters following "DCPR" for Philippine Airlines; near the end of the segment data for Cebu Pacific; for CX in this PNR it is the code after the final "/" (e.g. CX/FDJ3BN → FDJ3BN) but "none" for availability displays unless a PNR is present. If unsure and Record type is "none", use "none".
+- segment_record_locator: extract the 6-char alphanumeric locator at end of segment line.
+  PR: follows "DCPR" (e.g. "DCPRABCDE123" → "ABCDE123"). 5J: near end of line.
+  For any airline ending with "CODE/6CHAR" (e.g. "UA/ENC0WM" → "ENC0WM", "CX/FDJ3BN" → "FDJ3BN"),
+  extract the 6-char code after '/'. If no pattern present and Record type is "none", use "none".
 - For codeshare legs formatted like "FJ:QF3873", emit the QF marketing code and number (Qantas 3873).
 - When translating airport codes, choose the airport that exactly matches the 3-letter code; NEVER substitute a nearby or different airport.
 
